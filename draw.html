@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>TT Sketch</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<style>
+  :root { --bg:#f4f3ef; --paper:#fffdf7; --bar:rgba(255,255,255,.92); --text:#1c1c1e; --line:rgba(120,120,128,.25); --rule:rgba(0,90,200,.12); --tint:#ff2d55; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#000; --paper:#151517; --bar:rgba(28,28,30,.92); --text:#f2f2f7; --line:rgba(120,120,128,.35); --rule:rgba(120,170,255,.12); } }
+  * { box-sizing:border-box; -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; }
+  html, body { margin:0; height:100%; overflow:hidden; background:var(--bg); color:var(--text); font:15px -apple-system, system-ui, sans-serif; }
+  #bar { position:fixed; left:0; right:0; top:0; padding:calc(env(safe-area-inset-top) + 8px) 12px 8px; background:var(--bar); backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px);
+         display:flex; gap:8px; align-items:center; flex-wrap:wrap; border-bottom:1px solid var(--line); z-index:2; }
+  #bar button { font:600 14px -apple-system, system-ui; border:1px solid var(--line); background:transparent; color:var(--text); border-radius:10px; padding:8px 11px; min-width:44px; min-height:40px; }
+  #bar button.on { background:var(--tint); color:#fff; border-color:var(--tint); }
+  .sw { width:30px; height:30px; border-radius:50%; border:2px solid var(--line); padding:0 !important; min-width:30px !important; min-height:30px !important; }
+  .sw.on { outline:3px solid var(--tint); outline-offset:2px; }
+  #pages { margin-left:auto; font-size:13px; opacity:.7; }
+  canvas { position:fixed; left:0; top:0; touch-action:none; }
+  a { color:var(--tint); }
+</style>
+</head>
+<body>
+<div id="bar">
+  <a href="./">‹ Test</a>
+  <button data-tool="pen" class="on">Pen</button>
+  <button data-tool="hl">Highlighter</button>
+  <button data-tool="eraser">Eraser</button>
+  <span id="swatches"></span>
+  <button id="undo">Undo</button>
+  <button id="redo">Redo</button>
+  <button id="clear">Clear</button>
+  <button id="save">Save PNG</button>
+  <span id="pages"></span>
+</div>
+<canvas id="c"></canvas>
+<script>
+// Strokes are kept as point lists and redrawn, so undo/redo/eraser are exact and the page survives reloads.
+const cv = document.getElementById('c'), ctx = cv.getContext('2d', { desynchronized: true });
+const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const COLORS = ['#1c1c1e', '#0a84ff', '#ff3b30', '#34c759', '#af52de'];
+let tool = 'pen', color = COLORS[0], strokes = [], redo = [], cur = null, penSeen = false;
+try { strokes = JSON.parse(localStorage.getItem('tt-sketch') || '[]'); } catch {}
+const persist = () => { try { localStorage.setItem('tt-sketch', JSON.stringify(strokes)); } catch {} };
+
+const sw = document.getElementById('swatches');
+COLORS.forEach((c, i) => { const b = document.createElement('button'); b.className = 'sw' + (i ? '' : ' on'); b.style.background = c; b.onclick = () => { color = c; sw.querySelectorAll('.sw').forEach((x) => x.classList.toggle('on', x === b)); if (tool === 'eraser') setTool('pen'); }; sw.appendChild(b); });
+const setTool = (t) => { tool = t; document.querySelectorAll('[data-tool]').forEach((b) => b.classList.toggle('on', b.dataset.tool === t)); };
+document.querySelectorAll('[data-tool]').forEach((b) => (b.onclick = () => setTool(b.dataset.tool)));
+
+function fit() {
+  const d = devicePixelRatio || 1; cv.width = innerWidth * d; cv.height = innerHeight * d;
+  cv.style.width = innerWidth + 'px'; cv.style.height = innerHeight + 'px'; ctx.setTransform(d, 0, 0, d, 0, 0); redraw();
+}
+function paper() {
+  ctx.fillStyle = css('--paper'); ctx.fillRect(0, 0, innerWidth, innerHeight);
+  ctx.strokeStyle = css('--rule'); ctx.lineWidth = 1;
+  for (let y = 120; y < innerHeight; y += 32) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(innerWidth, y); ctx.stroke(); }
+}
+function drawStroke(s, from = 1) {
+  const p = s.pts; ctx.lineCap = ctx.lineJoin = 'round';
+  ctx.globalAlpha = s.tool === 'hl' ? 0.3 : 1; ctx.strokeStyle = s.color;
+  for (let i = Math.max(1, from); i < p.length; i++) {
+    ctx.lineWidth = s.tool === 'hl' ? 22 : 0.8 + p[i][2] * 5.5;
+    ctx.beginPath(); ctx.moveTo(p[i - 1][0], p[i - 1][1]); ctx.lineTo(p[i][0], p[i][1]); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+}
+function redraw() { paper(); strokes.forEach((s) => drawStroke(s)); document.getElementById('pages').textContent = `${strokes.length} strokes`; }
+
+const near = (s, x, y) => s.pts.some((p) => (p[0] - x) ** 2 + (p[1] - y) ** 2 < 16 * 16);
+const ignore = (e) => { if (e.pointerType === 'pen') penSeen = true; return penSeen && e.pointerType === 'touch'; }; // palm rejection
+
+cv.addEventListener('pointerdown', (e) => {
+  if (ignore(e)) return; e.preventDefault(); cv.setPointerCapture(e.pointerId);
+  cur = tool === 'eraser' ? { erase: true } : { tool, color, pts: [[e.clientX, e.clientY, e.pointerType === 'pen' ? e.pressure : 0.5]] };
+});
+cv.addEventListener('pointermove', (e) => {
+  if (!cur || ignore(e)) return; e.preventDefault();
+  const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+  if (cur.erase) {
+    const before = strokes.length;
+    for (const c of evs.length ? evs : [e]) strokes = strokes.filter((s) => !near(s, c.clientX, c.clientY));
+    if (strokes.length !== before) { redo = []; redraw(); }
+    return;
+  }
+  const start = cur.pts.length;
+  for (const c of evs.length ? evs : [e]) cur.pts.push([c.clientX, c.clientY, c.pointerType === 'pen' ? c.pressure : 0.5]);
+  drawStroke(cur, start); // draw only the new bit: keeps ink fast
+});
+const end = () => { if (cur && !cur.erase && cur.pts.length > 1) { strokes.push(cur); redo = []; } cur = null; persist(); redraw(); };
+cv.addEventListener('pointerup', end); cv.addEventListener('pointercancel', end);
+
+document.getElementById('undo').onclick = () => { if (strokes.length) { redo.push(strokes.pop()); persist(); redraw(); } };
+document.getElementById('redo').onclick = () => { if (redo.length) { strokes.push(redo.pop()); persist(); redraw(); } };
+document.getElementById('clear').onclick = () => { if (strokes.length) { redo = strokes.reverse(); strokes = []; persist(); redraw(); } };
+document.getElementById('save').onclick = () => { const a = document.createElement('a'); a.download = 'sketch.png'; a.href = cv.toDataURL('image/png'); a.click(); };
+document.addEventListener('touchmove', (e) => e.preventDefault(), { passive: false });
+addEventListener('resize', fit); fit();
+</script>
+</body>
+</html>
