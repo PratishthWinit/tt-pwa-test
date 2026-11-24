@@ -13,6 +13,7 @@
   /* Same look as TAMTAM's Draw tab: black chrome, white infinite board, dark blurred docks. */
   :root { --chrome:#000; --text:#fff; --muted:#888; --tint:#ff2d55; --glass:rgba(30,30,32,.82); --edge:rgba(255,255,255,.12); --pop:rgba(36,36,38,.96); --board:#fff; }
   * { box-sizing:border-box; -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; -webkit-tap-highlight-color:transparent; }
+  button, #picker, .pop, #dock { touch-action:manipulation; } /* no double-tap-zoom wait on iPad taps */
   html, body { margin:0; height:100%; overflow:hidden; background:var(--chrome); color:var(--text); font:15px -apple-system, system-ui, sans-serif; }
   body { display:flex; flex-direction:column; }
   header { display:flex; justify-content:space-between; align-items:center; padding:calc(env(safe-area-inset-top) + 12px) 20px 14px; }
@@ -147,6 +148,20 @@
 import { getStroke } from './perfect-freehand.mjs';
 
 const $ = (s) => document.querySelector(s);
+// draw.html?debug: on-screen log of every touch / Pencil / tap and what the page decided.
+const dlog = new URLSearchParams(location.search).has('debug') ? (() => {
+  const lines = [], el = document.createElement('pre'), btn = document.createElement('button');
+  el.style.cssText = 'position:fixed;left:8px;top:calc(env(safe-area-inset-top) + 86px);z-index:60;width:min(560px,calc(100% - 16px));max-height:46vh;overflow:hidden;margin:0;padding:8px;background:rgba(0,0,0,.8);color:#7CFC00;font:11px/1.35 ui-monospace,Menlo,monospace;pointer-events:none;border-radius:8px;white-space:pre-wrap';
+  btn.textContent = 'Copy debug log'; btn.style.cssText = 'position:fixed;right:8px;top:calc(env(safe-area-inset-top) + 86px);z-index:61;border:0;border-radius:10px;padding:10px 12px;background:#ff2d55;color:#fff;font:600 14px -apple-system,system-ui';
+  btn.onclick = () => { const t = lines.join('\n') + '\n' + navigator.userAgent; navigator.clipboard.writeText(t).then(() => alert('Copied. Paste it in WhatsApp.'), () => prompt('Copy this:', t)); };
+  document.body.append(el, btn);
+  addEventListener('error', (e) => log('ERROR ' + e.message + ' @' + e.lineno));
+  addEventListener('unhandledrejection', (e) => log('ERROR promise ' + (e.reason?.message || e.reason)));
+  document.addEventListener('pointerdown', (e) => { if (e.target !== board) log(`tap ${e.pointerType} on ${e.target.closest('button')?.getAttribute('aria-label') || e.target.closest('[data-c],[data-t],[id]')?.id || e.target.tagName}`); }, true);
+  document.addEventListener('touchstart', (e) => { const t = e.changedTouches[0]; log(`touchstart n=${e.touches.length} r=${(t.radiusX ?? t.webkitRadiusX ?? '?')} force=${t.force?.toFixed?.(2)} type=${t.touchType || '?'}`); }, true);
+  function log(m) { lines.push(`${(performance.now() / 1000).toFixed(2)} ${m}`); if (lines.length > 300) lines.shift(); el.textContent = lines.slice(-24).join('\n'); }
+  return log;
+})() : () => {};
 const store = (k, v) => { try { if (v === undefined) return JSON.parse(localStorage.getItem(k)); localStorage.setItem(k, JSON.stringify(v)); } catch { return null; } };
 const uid = () => Math.random().toString(36).slice(2, 10);
 
@@ -313,6 +328,7 @@ function updatePinch() {
   const m = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
   // A resting palm barely moves: ignore the first 10 px so it can't nudge the board.
   if (!pinch.active && Math.abs(Math.hypot(b.x - a.x, b.y - a.y) - pinch.d0) < 10 && Math.hypot(m.x - pinch.m0.x, m.y - pinch.m0.y) < 10) return;
+  if (!pinch.active) dlog('  -> pinch moving');
   pinch.active = true;
   if (pinch.ruler) {
     let ang = pinch.r0.a + Math.atan2(b.y - a.y, b.x - a.x) - pinch.a0;
@@ -367,6 +383,7 @@ function eraseAt(w) {
 board.addEventListener('pointerdown', (e) => {
   e.preventDefault(); closePops();
   const p = pt(e);
+  dlog(`down ${e.pointerType}#${e.pointerId} w${Math.round(e.width)} h${Math.round(e.height)} p${e.pressure.toFixed(2)} touches=${touches.size} penDown=${penDown} penSeen=${penSeen}`);
   if (e.pointerType === 'pen') { penDown = true; hover = null; if (!penSeen) { penSeen = true; store('tt-sk-penSeen', true); } if (pinch) { // two "fingers" just before the Pencil landed = a palm: undo what they did
       if (performance.now() - pinch.t0 < 600) { view = { ...pinch.v0 }; Object.assign(ruler, pinch.r0); $('#ztext').textContent = Math.round(view.z * 100) + '%'; }
       pinch = null; rebuild();
@@ -374,19 +391,21 @@ board.addEventListener('pointerdown', (e) => {
     touches.clear(); rulerDrag = null;
   }
   if (e.pointerType === 'touch') {
-    if (penDown || performance.now() - penUpAt < 400) return; // palm while writing
-    if (e.width > 45 || e.height > 45) return; // contact far bigger than a fingertip = palm
+    if (penDown || performance.now() - penUpAt < 400) return dlog('  -> ignored: Pencil is writing (palm)');
+    // Safari sizes a touch from its contact radius: fingertips come out ~40-65 px, a palm well over 100
+    if (e.width > 90 || e.height > 90) return dlog('  -> ignored: palm-sized contact');
     touches.set(e.pointerId, p);
-    if (touches.size === 2) { cancelLive(); startPinch(); return; }
+    if (touches.size === 2) { cancelLive(); startPinch(); return dlog('  -> pinch start'); }
     if (touches.size > 2) { // 3+ contacts = a resting hand, not a pinch: undo anything it moved
       if (pinch) { view = { ...pinch.v0 }; Object.assign(ruler, pinch.r0); $('#ztext').textContent = Math.round(view.z * 100) + '%'; pinch = null; rebuild(); }
-      return;
+      return dlog('  -> 3+ contacts: resting hand, ignored');
     }
     if (onRuler(p.x, p.y)) { rulerDrag = { id: e.pointerId, sx: p.x, sy: p.y, cx: ruler.cx, cy: ruler.cy }; return; }
     const movingSel = tool === 'lasso' && sel && (() => { const w = toWorld(p), b = selBox(); return w.x > b.x0 && w.x < b.x1 && w.y > b.y0 && w.y < b.y1; })();
-    if (!fingerDraws() && !movingSel) return;
+    if (!fingerDraws() && !movingSel) return dlog('  -> one finger: nothing (Pencil draws, 2 fingers zoom)');
   }
-  board.setPointerCapture(e.pointerId);
+  try { board.setPointerCapture(e.pointerId); } catch {}
+  dlog(`  -> ${picking ? 'eyedropper' : 'draw with ' + tool}`);
   if (picking) { pickColor(p); return; }
   if (actor != null) return;
   begin(e, p); dirty = true;
@@ -411,6 +430,7 @@ board.addEventListener('pointermove', (e) => {
   dirty = true;
 });
 function end(e) {
+  dlog(`${e.type.slice(7)} ${e.pointerType}#${e.pointerId}`);
   if (e.pointerType === 'pen') { penDown = false; penUpAt = performance.now(); }
   if (touches.delete(e.pointerId) && pinch && touches.size < 2) { pinch = null; rebuild(); persist(); }
   if (rulerDrag?.id === e.pointerId) rulerDrag = null;
@@ -523,7 +543,7 @@ function renderPicker() {
     `<button class="pbtn" data-a="more" aria-label="More">${ICON.more}</button>`;
 }
 $('#picker').addEventListener('click', (e) => {
-  const b = e.target.closest('button'); if (!b) return;
+  const b = e.target.closest('button'); dlog(`picker click -> ${b ? b.dataset.t || b.dataset.c || b.dataset.a : 'no button'}`); if (!b) return;
   if (b.dataset.t) {
     const t = b.dataset.t;
     if (t === tool && t !== 'lasso') { togglePop('popTool', renderToolPop); return; } // tap again = settings
