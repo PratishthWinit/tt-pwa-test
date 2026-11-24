@@ -297,17 +297,22 @@ let penSeen = !!store('tt-sk-penSeen'), penDown = false, penUpAt = 0;
 let actor = null, live = null, snap = null, lasso = null, moving = null, erasing = null, pinch = null, rulerDrag = null, hover = null, picking = false;
 const fingerDraws = () => !penSeen || settings.finger;
 const pt = (e) => { const r = board.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
+const EDGE = 15000; // app board: PencilKit content spans ±15000 pt (PencilCanvasViewManager.m ORIGIN)
+const clampView = (v) => ({ z: v.z, tx: Math.min(EDGE * v.z, Math.max(W - EDGE * v.z, v.tx)), ty: Math.min(EDGE * v.z, Math.max(H - EDGE * v.z, v.ty)) });
 const toWorld = (p) => ({ x: (p.x - view.tx) / view.z, y: (p.y - view.ty) / view.z });
 
 function startPinch() {
   const [a, b] = [...touches.values()];
   const onR = ruler.on && onRuler(a.x, a.y);
-  pinch = { a0: Math.atan2(b.y - a.y, b.x - a.x), d0: Math.hypot(b.x - a.x, b.y - a.y), m0: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, v0: { ...view }, r0: { ...ruler }, ruler: onR };
+  pinch = { a0: Math.atan2(b.y - a.y, b.x - a.x), d0: Math.hypot(b.x - a.x, b.y - a.y), m0: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, v0: { ...view }, r0: { ...ruler }, ruler: onR, t0: performance.now(), active: false };
   rulerDrag = null;
 }
 function updatePinch() {
   const [a, b] = [...touches.values()];
   const m = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+  // A resting palm barely moves: ignore the first 10 px so it can't nudge the board.
+  if (!pinch.active && Math.abs(Math.hypot(b.x - a.x, b.y - a.y) - pinch.d0) < 10 && Math.hypot(m.x - pinch.m0.x, m.y - pinch.m0.y) < 10) return;
+  pinch.active = true;
   if (pinch.ruler) {
     let ang = pinch.r0.a + Math.atan2(b.y - a.y, b.x - a.x) - pinch.a0;
     const deg = ((ang * 180) / Math.PI) % 45; if (Math.abs(deg) < 2 || Math.abs(deg) > 43) ang = Math.round(ang / (Math.PI / 4)) * (Math.PI / 4); // snap to 45°
@@ -315,7 +320,7 @@ function updatePinch() {
   } else {
     const z = Math.max(0.1, Math.min(15, (pinch.v0.z * Math.hypot(b.x - a.x, b.y - a.y)) / pinch.d0));
     const wx = (pinch.m0.x - pinch.v0.tx) / pinch.v0.z, wy = (pinch.m0.y - pinch.v0.ty) / pinch.v0.z;
-    view = { z, tx: m.x - wx * z, ty: m.y - wy * z };
+    view = clampView({ z, tx: m.x - wx * z, ty: m.y - wy * z });
     $('#ztext').textContent = Math.round(z * 100) + '%';
     if (sel) showSelMenu();
   }
@@ -361,12 +366,21 @@ function eraseAt(w) {
 board.addEventListener('pointerdown', (e) => {
   e.preventDefault(); closePops();
   const p = pt(e);
-  if (e.pointerType === 'pen') { penDown = true; hover = null; if (!penSeen) { penSeen = true; store('tt-sk-penSeen', true); } if (pinch) { pinch = null; touches.clear(); rebuild(); } }
+  if (e.pointerType === 'pen') { penDown = true; hover = null; if (!penSeen) { penSeen = true; store('tt-sk-penSeen', true); } if (pinch) { // two "fingers" just before the Pencil landed = a palm: undo what they did
+      if (performance.now() - pinch.t0 < 600) { view = { ...pinch.v0 }; Object.assign(ruler, pinch.r0); $('#ztext').textContent = Math.round(view.z * 100) + '%'; }
+      pinch = null; rebuild();
+    }
+    touches.clear(); rulerDrag = null;
+  }
   if (e.pointerType === 'touch') {
     if (penDown || performance.now() - penUpAt < 400) return; // palm while writing
+    if (e.width > 45 || e.height > 45) return; // contact far bigger than a fingertip = palm
     touches.set(e.pointerId, p);
     if (touches.size === 2) { cancelLive(); startPinch(); return; }
-    if (touches.size > 2) return;
+    if (touches.size > 2) { // 3+ contacts = a resting hand, not a pinch: undo anything it moved
+      if (pinch) { view = { ...pinch.v0 }; Object.assign(ruler, pinch.r0); $('#ztext').textContent = Math.round(view.z * 100) + '%'; pinch = null; rebuild(); }
+      return;
+    }
     if (onRuler(p.x, p.y)) { rulerDrag = { id: e.pointerId, sx: p.x, sy: p.y, cx: ruler.cx, cy: ruler.cy }; return; }
     const movingSel = tool === 'lasso' && sel && (() => { const w = toWorld(p), b = selBox(); return w.x > b.x0 && w.x < b.x1 && w.y > b.y0 && w.y < b.y1; })();
     if (!fingerDraws() && !movingSel) return;
@@ -424,8 +438,8 @@ board.addEventListener('pointercancel', end);
 board.addEventListener('pointerleave', (e) => { if (e.pointerType === 'pen') { hover = null; dirty = true; } });
 board.addEventListener('wheel', (e) => { // trackpad / mouse on a computer
   e.preventDefault();
-  if (e.ctrlKey) { const p = pt(e), z = Math.max(0.1, Math.min(15, view.z * Math.exp(-e.deltaY / 100))); const w = toWorld(p); view = { z, tx: p.x - w.x * z, ty: p.y - w.y * z }; }
-  else view = { ...view, tx: view.tx - e.deltaX, ty: view.ty - e.deltaY };
+  if (e.ctrlKey) { const p = pt(e), z = Math.max(0.1, Math.min(15, view.z * Math.exp(-e.deltaY / 100))); const w = toWorld(p); view = clampView({ z, tx: p.x - w.x * z, ty: p.y - w.y * z }); }
+  else view = clampView({ ...view, tx: view.tx - e.deltaX, ty: view.ty - e.deltaY });
   $('#ztext').textContent = Math.round(view.z * 100) + '%'; dirty = true; clearTimeout(wheelT); wheelT = setTimeout(() => { rebuild(); persist(); }, 150);
 }, { passive: false });
 let wheelT = 0;
@@ -433,9 +447,8 @@ document.addEventListener('gesturestart', (e) => e.preventDefault());
 document.addEventListener('touchmove', (e) => { if (e.target === board) e.preventDefault(); }, { passive: false });
 
 // ---------------- Frame ----------------
-function frame() {
-  requestAnimationFrame(frame);
-  if (!dirty) return; dirty = false;
+function frame() { requestAnimationFrame(frame); if (dirty) { dirty = false; paint(); } }
+function paint() {
   ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, board.width, board.height);
   const k = view.z / cacheView.z; // while pinching, stretch the cached bitmap; rebuilt sharp on release
   ctx.setTransform(k, 0, 0, k, DPR * (view.tx - k * cacheView.tx), DPR * (view.ty - k * cacheView.ty));
@@ -654,8 +667,9 @@ function toast(t) { const el = $('#toast'); el.textContent = t; el.style.opacity
 if (new URLSearchParams(location.search).has('test')) {
   window.__sk = {
     get strokes() { return strokes; }, get view() { return view; }, get sel() { return sel; }, get tool() { return tool; },
-    get undoDepth() { return undoStack.length; }, ruler, tools, settings, board,
+    get undoDepth() { return undoStack.length; }, EDGE, ruler, tools, settings, board,
     inPoly, toRuler, fromRuler, outline, hsl, hexOf, rgb, exportCanvas,
+    load(list) { strokes = list.map(finalize); rebuild(); },
   };
 }
 
