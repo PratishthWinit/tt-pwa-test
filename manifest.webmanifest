@@ -1,7 +1,7 @@
 {
-  "name": "TAMTAM Web Test",
-  "short_name": "TT Test",
-  "start_url": "./",
+  "name": "Sketchbook",
+  "short_name": "Sketchbook",
+  "start_url": "./draw.html",
   "scope": "./",
   "display": "standalone",
   "background_color": "#000000",
